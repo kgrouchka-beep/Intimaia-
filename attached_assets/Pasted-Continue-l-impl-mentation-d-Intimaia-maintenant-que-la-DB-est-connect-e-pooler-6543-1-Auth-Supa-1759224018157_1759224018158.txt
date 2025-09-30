@@ -1,0 +1,38 @@
+Continue l’implémentation d’Intimaia maintenant que la DB est connectée (pooler 6543).
+
+1) Auth Supabase
+- Utiliser Supabase Auth (email/password).
+- Endpoints: POST /api/auth/signup, POST /api/auth/login, POST /api/auth/logout, GET /api/me.
+- Middleware qui vérifie le JWT Supabase (Bearer) et associe req.user.id = auth.uid().
+
+2) Confessions API (+ RLS déjà en place)
+- POST /api/confess {content} → validations (10–5000 chars), modération OpenAI, cap IA (ai_usage), appel IA (timeout 10s) ou fallback heuristique, insert dans confessions (ai_summary, ai_tags, ai_intensity, ai_reply).
+- GET /api/confessions → liste paginée des confessions de l’utilisateur courant, tri created_at desc.
+- DELETE /api/confessions/:id → supprime seulement si owner (RLS protège).
+
+3) Stripe Checkout
+- POST /api/checkout → crée session Stripe (price_id = STRIPE_PRICE_ID, mode=subscription).
+- POST /api/billing/portal → renvoie l’URL du portail client.
+- POST /api/webhook (déjà branché) → vérifier la signature, gérer checkout.session.completed et invoice.payment_succeeded pour mettre à jour users_subscriptions (status, current_period_end).
+
+4) Admin & quotas
+- GET /api/admin/stats (JWT admin) → nb users, nb confessions, ai_usage du mois, conversions.
+- GET /api/admin/ai-usage → suivi des tokens/costs.
+
+5) Sécurité & limites
+- express-rate-limit: 10 req/min IP non auth, 100 req/min user auth.
+- helmet() + CORS domaine Replit.
+- Validation stricte des inputs (email regex, no HTML, tags max 4).
+- Ne jamais logger contenu des confessions ni secrets.
+
+6) Variables requises (déjà dans Secrets ; ne rien hardcoder)
+- DATABASE_URL (pooler 6543), SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_KEY
+- STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID
+- OPENAI_API_KEY, FEATURE_AI=true, AI_MODEL=gpt-4o-mini, AI_MAX_TOKENS=256, AI_MONTHLY_HARDCAP_EUR=20, AI_SOFTCAP_WARN_EUR=18, FX_USD_EUR=0.92
+- SESSION_SECRET, MAINTENANCE_MODE=false, MAX_FREE_CONFESSIONS=30
+
+7) Tests obligatoires
+- RLS: User A ne peut pas lire/supprimer les confessions de B.
+- Webhook Stripe signature invalide → 400.
+- Cap IA atteint → fallback heuristique OK.
+- Export RGPD /api/me/export renvoie tout (confessions + métadonnées).
