@@ -4,6 +4,7 @@ import Stripe from "stripe";
 import { storage } from "./storage";
 import { insertSubscriptionSchema } from "@shared/schema";
 import { log } from "./vite";
+import { initDatabase } from "./db-init";
 
 // Environment variable validation
 if (!process.env.STRIPE_SECRET_KEY) {
@@ -19,6 +20,11 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 });
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Initialize database tables (non-blocking)
+  initDatabase().catch(err => {
+    log(`Database initialization failed: ${err.message}`);
+    log(`Server will continue running but database operations may fail`);
+  });
   // Health check endpoint
   app.get("/api/health", async (req, res) => {
     try {
