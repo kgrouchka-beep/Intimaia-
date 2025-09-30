@@ -167,3 +167,23 @@ export function getUserEmail(req: any): string | undefined {
   const user = req.user as any;
   return user.claims?.email;
 }
+
+export const isAdmin: RequestHandler = async (req, res, next) => {
+  const userId = getUserId(req);
+  
+  if (!userId) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+
+  try {
+    const user = await storage.getUser(userId);
+    
+    if (!user || !user.isAdmin) {
+      return res.status(403).json({ message: "Forbidden: Admin access required" });
+    }
+    
+    return next();
+  } catch (error) {
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};

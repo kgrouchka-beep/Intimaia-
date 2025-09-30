@@ -4,7 +4,7 @@ import Stripe from "stripe";
 import { storage } from "./storage";
 import { insertSubscriptionSchema, insertConfessionSchema, insertEmailSchema } from "@shared/schema";
 import { log } from "./vite";
-import { isAuthenticated, getUserId, getUserEmail } from "./replitAuth";
+import { isAuthenticated, isAdmin, getUserId, getUserEmail } from "./replitAuth";
 import { moderateContent, analyzeConfession, checkAIBudget } from "./openai";
 import { confessionSchema, emailSubscribeSchema } from "./validation";
 import rateLimit from "express-rate-limit";
@@ -408,7 +408,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/admin/stats", isAuthenticated, async (req: Request, res) => {
+  app.get("/api/admin/stats", isAuthenticated, isAdmin, async (req: Request, res) => {
     try {
       const currentMonth = new Date().toISOString().substring(0, 7);
       const aiUsage = await storage.getAiUsageByMonth(currentMonth);
@@ -422,7 +422,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/admin/ai-usage", isAuthenticated, async (req: Request, res) => {
+  app.get("/api/admin/ai-usage", isAuthenticated, isAdmin, async (req: Request, res) => {
     try {
       const budget = await checkAIBudget();
       res.json(budget);
