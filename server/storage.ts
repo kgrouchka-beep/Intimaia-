@@ -2,8 +2,6 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { eq, and, desc } from "drizzle-orm";
 import { 
-  type User, 
-  type InsertUser, 
   type Subscription, 
   type InsertSubscription,
   type Confession,
@@ -12,7 +10,6 @@ import {
   type InsertAiUsage,
   type Email,
   type InsertEmail,
-  users,
   confessions,
   aiUsage,
   usersSubscriptions,
@@ -38,13 +35,6 @@ const sql = postgres(databaseUrl, {
 export const db = drizzle(sql);
 
 export interface IStorage {
-  // User methods
-  getUser(id: string): Promise<User | undefined>;
-  getUserByEmail(email: string): Promise<User | undefined>;
-  createUser(user: InsertUser): Promise<User>;
-  updateUserPremiumStatus(userId: string, isPremium: boolean, stripeCustomerId?: string): Promise<User | undefined>;
-  deleteUser(userId: string): Promise<void>;
-  
   // Confession methods
   createConfession(confession: InsertConfession): Promise<Confession>;
   getConfessionsByUserId(userId: string, limit?: number): Promise<Confession[]>;
@@ -58,14 +48,23 @@ export interface IStorage {
   }): Promise<Confession | undefined>;
   
   // AI Usage methods
-  getAiUsage(userId: string, month: string): Promise<AiUsage | undefined>;
-  createOrUpdateAiUsage(data: InsertAiUsage & { tokensToAdd: number; costToAdd: string }): Promise<AiUsage>;
+  getAiUsageByMonth(month: string): Promise<AiUsage | undefined>;
+  createOrUpdateAiUsage(data: {
+    month: string;
+    inputTokensToAdd: number;
+    outputTokensToAdd: number;
+    costToAdd: string;
+  }): Promise<AiUsage>;
   
   // Subscription methods
   createSubscription(subscription: InsertSubscription): Promise<Subscription>;
-  getSubscriptionByStripeSessionId(stripeSessionId: string): Promise<Subscription | undefined>;
+  getSubscriptionByStripeCustomerId(stripeCustomerId: string): Promise<Subscription | undefined>;
   getUserSubscriptions(userId: string): Promise<Subscription[]>;
-  updateSubscriptionStatus(stripeSessionId: string, active: boolean, expiresAt?: Date): Promise<Subscription | undefined>;
+  updateSubscriptionStatus(
+    stripeCustomerId: string, 
+    status: string, 
+    currentPeriodEnd?: Date
+  ): Promise<Subscription | undefined>;
   
   // Email methods
   createEmail(email: InsertEmail): Promise<Email>;
@@ -73,38 +72,6 @@ export interface IStorage {
 }
 
 export class DbStorage implements IStorage {
-  // User methods
-  async getUser(id: string): Promise<User | undefined> {
-    const result = await db.select().from(users).where(eq(users.id, id)).limit(1);
-    return result[0];
-  }
-
-  async getUserByEmail(email: string): Promise<User | undefined> {
-    const result = await db.select().from(users).where(eq(users.email, email)).limit(1);
-    return result[0];
-  }
-
-  async createUser(insertUser: InsertUser): Promise<User> {
-    const result = await db.insert(users).values(insertUser).returning();
-    return result[0];
-  }
-
-  async updateUserPremiumStatus(userId: string, isPremium: boolean, stripeCustomerId?: string): Promise<User | undefined> {
-    const updateData: any = { isPremium };
-    if (stripeCustomerId) {
-      updateData.stripeCustomerId = stripeCustomerId;
-    }
-    const result = await db.update(users)
-      .set(updateData)
-      .where(eq(users.id, userId))
-      .returning();
-    return result[0];
-  }
-
-  async deleteUser(userId: string): Promise<void> {
-    await db.delete(users).where(eq(users.id, userId));
-  }
-
   // Confession methods
   async createConfession(insertConfession: InsertConfession): Promise<Confession> {
     const result = await db.insert(confessions).values(insertConfession).returning();
@@ -145,34 +112,41 @@ export class DbStorage implements IStorage {
   }
 
   // AI Usage methods
-  async getAiUsage(userId: string, month: string): Promise<AiUsage | undefined> {
+  async getAiUsageByMonth(month: string): Promise<AiUsage | undefined> {
     const result = await db.select()
       .from(aiUsage)
-      .where(and(eq(aiUsage.userId, userId), eq(aiUsage.month, month)))
+      .where(eq(aiUsage.month, month))
       .limit(1);
     return result[0];
   }
 
-  async createOrUpdateAiUsage(data: InsertAiUsage & { tokensToAdd: number; costToAdd: string }): Promise<AiUsage> {
-    const existing = await this.getAiUsage(data.userId, data.month);
+  async createOrUpdateAiUsage(data: {
+    month: string;
+    inputTokensToAdd: number;
+    outputTokensToAdd: number;
+    costToAdd: string;
+  }): Promise<AiUsage> {
+    const existing = await this.getAiUsageByMonth(data.month);
     
     if (existing) {
-      const newTokens = existing.tokens + data.tokensToAdd;
+      const newInputTokens = (existing.totalInputTokens || 0) + data.inputTokensToAdd;
+      const newOutputTokens = (existing.totalOutputTokens || 0) + data.outputTokensToAdd;
       const newCost = (parseFloat(existing.estCostEur) + parseFloat(data.costToAdd)).toFixed(4);
       
       const result = await db.update(aiUsage)
         .set({ 
-          tokens: newTokens, 
+          totalInputTokens: newInputTokens,
+          totalOutputTokens: newOutputTokens,
           estCostEur: newCost 
         })
-        .where(and(eq(aiUsage.userId, data.userId), eq(aiUsage.month, data.month)))
+        .where(eq(aiUsage.month, data.month))
         .returning();
       return result[0];
     } else {
       const result = await db.insert(aiUsage).values({
-        userId: data.userId,
         month: data.month,
-        tokens: data.tokensToAdd,
+        totalInputTokens: data.inputTokensToAdd,
+        totalOutputTokens: data.outputTokensToAdd,
         estCostEur: data.costToAdd,
       }).returning();
       return result[0];
@@ -185,10 +159,10 @@ export class DbStorage implements IStorage {
     return result[0];
   }
 
-  async getSubscriptionByStripeSessionId(stripeSessionId: string): Promise<Subscription | undefined> {
+  async getSubscriptionByStripeCustomerId(stripeCustomerId: string): Promise<Subscription | undefined> {
     const result = await db.select()
       .from(usersSubscriptions)
-      .where(eq(usersSubscriptions.stripeSessionId, stripeSessionId))
+      .where(eq(usersSubscriptions.stripeCustomerId, stripeCustomerId))
       .limit(1);
     return result[0];
   }
@@ -197,17 +171,21 @@ export class DbStorage implements IStorage {
     return await db.select()
       .from(usersSubscriptions)
       .where(eq(usersSubscriptions.userId, userId))
-      .orderBy(desc(usersSubscriptions.createdAt));
+      .orderBy(desc(usersSubscriptions.updatedAt));
   }
 
-  async updateSubscriptionStatus(stripeSessionId: string, active: boolean, expiresAt?: Date): Promise<Subscription | undefined> {
-    const updateData: any = { active };
-    if (expiresAt) {
-      updateData.expiresAt = expiresAt;
+  async updateSubscriptionStatus(
+    stripeCustomerId: string, 
+    status: string, 
+    currentPeriodEnd?: Date
+  ): Promise<Subscription | undefined> {
+    const updateData: any = { status, updatedAt: new Date() };
+    if (currentPeriodEnd) {
+      updateData.currentPeriodEnd = currentPeriodEnd;
     }
     const result = await db.update(usersSubscriptions)
       .set(updateData)
-      .where(eq(usersSubscriptions.stripeSessionId, stripeSessionId))
+      .where(eq(usersSubscriptions.stripeCustomerId, stripeCustomerId))
       .returning();
     return result[0];
   }

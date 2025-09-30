@@ -4,7 +4,6 @@ import Stripe from "stripe";
 import { storage } from "./storage";
 import { insertSubscriptionSchema } from "@shared/schema";
 import { log } from "./vite";
-import { initDatabase } from "./db-init";
 
 // Environment variable validation
 if (!process.env.STRIPE_SECRET_KEY) {
@@ -16,15 +15,10 @@ if (!process.env.STRIPE_WEBHOOK_SECRET) {
 }
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2024-06-20",
+  apiVersion: "2025-08-27.basil",
 });
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  // Initialize database tables (non-blocking)
-  initDatabase().catch(err => {
-    log(`Database initialization failed: ${err.message}`);
-    log(`Server will continue running but database operations may fail`);
-  });
   // Health check endpoint
   app.get("/api/health", async (req, res) => {
     try {
@@ -67,26 +61,41 @@ export async function registerRoutes(app: Express): Promise<Server> {
       try {
         // Extract customer information from the session
         const customerId = session.customer as string;
-        const sessionId = session.id;
+        const subscriptionId = session.subscription as string;
         
         // Check if subscription already exists
-        const existingSubscription = await storage.getSubscriptionByStripeSessionId(sessionId);
+        const existingSubscription = await storage.getSubscriptionByStripeCustomerId(customerId);
         
         if (existingSubscription) {
-          log(`Subscription already exists for session: ${sessionId}`);
+          log(`Subscription already exists for customer: ${customerId}`);
           return res.json({ received: true, message: 'Subscription already exists' });
         }
 
-        // For demo purposes, we'll use a default user ID
-        // In a real app, you'd associate the customer ID with a user
-        const defaultUserId = "default-user-id";
+        // Get metadata from session (assumes user_id is passed in metadata)
+        const userId = session.metadata?.user_id || session.client_reference_id;
+        
+        if (!userId) {
+          log(`No user_id found in session metadata`);
+          return res.status(400).json({ error: 'Missing user_id in session metadata' });
+        }
+        
+        // Fetch subscription details from Stripe to get all fields
+        const stripeSubscription = subscriptionId 
+          ? await stripe.subscriptions.retrieve(subscriptionId)
+          : null;
         
         // Create new subscription record
-        const subscriptionData = {
-          userId: defaultUserId,
-          stripeSessionId: sessionId,
-          active: true,
+        const subscriptionData: any = {
+          userId,
+          stripeCustomerId: customerId,
+          stripePriceId: stripeSubscription?.items?.data[0]?.price?.id,
+          status: stripeSubscription?.status || 'incomplete',
         };
+        
+        // Add current_period_end if available
+        if (stripeSubscription && (stripeSubscription as any).current_period_end) {
+          subscriptionData.currentPeriodEnd = new Date((stripeSubscription as any).current_period_end * 1000);
+        }
 
         // Validate the subscription data
         const validatedData = insertSubscriptionSchema.parse(subscriptionData);
@@ -94,7 +103,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Store the subscription in the database
         const newSubscription = await storage.createSubscription(validatedData);
         
-        log(`Created subscription: ${newSubscription.id} for session: ${sessionId}`);
+        log(`Created subscription: ${newSubscription.id} for customer: ${customerId}`);
         
         res.json({ 
           received: true, 
@@ -123,7 +132,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       res.json({
         subscriptions,
-        activeCount: subscriptions.filter(s => s.active).length
+        activeCount: subscriptions.filter(s => s.status === 'active').length
       });
     } catch (error: any) {
       log(`Error fetching subscriptions: ${error.message}`);
@@ -134,12 +143,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
 
   // Log the server URL on startup
-  const originalListen = httpServer.listen;
-  httpServer.listen = function(this: any, ...args: any[]) {
-    const result = originalListen.apply(this, args);
+  const originalListen = httpServer.listen.bind(httpServer);
+  httpServer.listen = function(...args: any[]) {
+    const result = originalListen(...args);
     
     // Get the port from the arguments or environment
-    const port = args[0]?.port || process.env.PORT || 5000;
+    const port = typeof args[0] === 'number' ? args[0] : process.env.PORT || 5000;
     
     // Check if we have a Replit domain
     const replitDomains = process.env.REPLIT_DOMAINS;
@@ -153,11 +162,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } else {
       log(`🚀 Intimaia Backend running on port ${port}`);
       log(`🔗 Health Check: http://localhost:${port}/api/health`);
-      log(`🎯 Stripe Webhook: http://localhost:$({port}/api/webhook/stripe`);
+      log(`🎯 Stripe Webhook: http://localhost:${port}/api/webhook/stripe`);
     }
     
     return result;
-  };
+  } as any;
 
   return httpServer;
 }
