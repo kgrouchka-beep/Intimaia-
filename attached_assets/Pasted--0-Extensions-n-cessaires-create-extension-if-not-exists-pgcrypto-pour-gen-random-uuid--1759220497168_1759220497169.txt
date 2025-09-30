@@ -1,0 +1,142 @@
+-- 0) Extensions nécessaires
+create extension if not exists pgcrypto;     -- pour gen_random_uuid()
+create extension if not exists pg_trgm;      -- (optionnel) recherche plein-texte + trigrammes
+
+-- 1) Tables
+
+-- Journaux / confessions
+create table if not exists public.confessions (
+  id              uuid primary key default gen_random_uuid(),
+  user_id         uuid not null references auth.users(id) on delete cascade,
+  content         text not null,
+  created_at      timestamptz not null default now(),
+  ai_summary      text,
+  ai_tags         text[],
+  ai_intensity    int check (ai_intensity between 0 and 10),
+  ai_reply        text,
+  source          text default 'user' check (source in ('user','ai','heuristic'))
+);
+
+-- Suivi de la consommation IA (cap mensuel global)
+create table if not exists public.ai_usage (
+  month               text primary key,         -- ex: '2025-10'
+  total_input_tokens  bigint not null default 0,
+  total_output_tokens bigint not null default 0,
+  est_cost_eur        numeric not null default 0
+);
+
+-- Opt-in emails (landing)
+create table if not exists public.emails (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid references auth.users(id) on delete set null,
+  email       text unique not null,
+  created_at  timestamptz not null default now()
+);
+
+-- Abonnements (Stripe)
+create table if not exists public.users_subscriptions (
+  id                 uuid primary key default gen_random_uuid(),
+  user_id            uuid not null references auth.users(id) on delete cascade,
+  stripe_customer_id text unique,
+  stripe_price_id    text,
+  status             text check (status in ('active','trialing','past_due','canceled','incomplete')) default 'incomplete',
+  current_period_end timestamptz,
+  updated_at         timestamptz not null default now()
+);
+
+-- 2) Index utiles
+create index if not exists idx_confessions_user_created
+  on public.confessions (user_id, created_at desc);
+
+create index if not exists idx_emails_email
+  on public.emails using gin (email gin_trgm_ops);
+
+create index if not exists idx_users_subscriptions_user
+  on public.users_subscriptions (user_id);
+
+-- 3) RLS (Row Level Security)
+alter table public.confessions enable row level security;
+alter table public.emails      enable row level security;
+alter table public.users_subscriptions enable row level security;
+
+-- Confessions : chaque user ne voit/agit que sur ses lignes
+drop policy if exists "conf_select_own" on public.confessions;
+create policy "conf_select_own"
+  on public.confessions for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "conf_insert_own" on public.confessions;
+create policy "conf_insert_own"
+  on public.confessions for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "conf_update_own" on public.confessions;
+create policy "conf_update_own"
+  on public.confessions for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "conf_delete_own" on public.confessions;
+create policy "conf_delete_own"
+  on public.confessions for delete
+  using (auth.uid() = user_id);
+
+-- Emails : lecture/écriture limitées à l’utilisateur propriétaire
+drop policy if exists "emails_select_own" on public.emails;
+create policy "emails_select_own"
+  on public.emails for select
+  using (user_id is not distinct from auth.uid());
+
+drop policy if exists "emails_insert_self" on public.emails;
+create policy "emails_insert_self"
+  on public.emails for insert
+  with check (user_id is null or user_id = auth.uid());
+
+drop policy if exists "emails_delete_own" on public.emails;
+create policy "emails_delete_own"
+  on public.emails for delete
+  using (user_id is not distinct from auth.uid());
+
+-- Subscriptions : visible/éditable par le propriétaire uniquement
+drop policy if exists "subs_select_own" on public.users_subscriptions;
+create policy "subs_select_own"
+  on public.users_subscriptions for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "subs_upsert_own" on public.users_subscriptions;
+create policy "subs_upsert_own"
+  on public.users_subscriptions for insert
+  with check (auth.uid() = user_id);
+
+create policy if not exists "subs_update_own"
+  on public.users_subscriptions for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- 4) (Optionnel mais pratique) Trigger pour auto-renseigner user_id à l’insert
+create or replace function public.set_user_id()
+returns trigger language plpgsql as $$
+begin
+  if new.user_id is null then
+    new.user_id := auth.uid();
+  end if;
+  return new;
+end; $$;
+
+drop trigger if exists set_user_id_conf on public.confessions;
+create trigger set_user_id_conf
+  before insert on public.confessions
+  for each row execute function public.set_user_id();
+
+drop trigger if exists set_user_id_emails on public.emails;
+create trigger set_user_id_emails
+  before insert on public.emails
+  for each row execute function public.set_user_id();
+
+drop trigger if exists set_user_id_subs on public.users_subscriptions;
+create trigger set_user_id_subs
+  before insert on public.users_subscriptions
+  for each row execute function public.set_user_id();
+
+-- 5) Permissions API (facultatif : laisser PostgREST aux rôles Supabase par défaut)
+-- RLS couvre déjà l’isolation ; ne pas donner de privilèges explicites supplémentaires.
