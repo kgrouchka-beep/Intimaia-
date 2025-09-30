@@ -87,13 +87,15 @@ export async function requireAdmin(req: AuthRequest, res: Response, next: NextFu
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const { data: userData, error } = await supabaseAdmin
-      .from('users')
-      .select('is_admin')
-      .eq('id', req.user.id)
-      .single();
+    const { data: { user }, error } = await supabaseAdmin.auth.admin.getUserById(req.user.id);
 
-    if (error || !userData?.is_admin) {
+    if (error || !user) {
+      return res.status(403).json({ error: 'User not found' });
+    }
+
+    const isAdmin = user.user_metadata?.is_admin === true || user.app_metadata?.is_admin === true;
+
+    if (!isAdmin) {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
