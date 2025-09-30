@@ -18,6 +18,7 @@ import {
   emails,
   users
 } from "@shared/schema";
+import { pool, runAs } from "./db";
 
 if (!process.env.DATABASE_URL) {
   throw new Error(
@@ -43,10 +44,10 @@ export interface IStorage {
   upsertUser(user: UpsertUser): Promise<User>;
   
   // Confession methods
-  createConfession(confession: InsertConfession): Promise<Confession>;
-  getConfessionsByUserId(userId: string, limit?: number): Promise<Confession[]>;
-  getConfessionCount(userId: string): Promise<number>;
-  deleteConfession(id: string, userId: string): Promise<boolean>;
+  createConfession(confession: InsertConfession, role?: string): Promise<Confession>;
+  getConfessionsByUserId(userId: string, role?: string, limit?: number): Promise<Confession[]>;
+  getConfessionCount(userId: string, role?: string): Promise<number>;
+  deleteConfession(id: string, userId: string, role?: string): Promise<boolean>;
   updateConfessionAiData(id: string, aiData: {
     aiSummary: string;
     aiTags: string[];
@@ -101,40 +102,48 @@ export class DbStorage implements IStorage {
   }
 
   // Confession methods
-  async createConfession(insertConfession: InsertConfession): Promise<Confession> {
-    return await db.transaction(async (tx) => {
-      await sql`SET LOCAL app.user_id = ${insertConfession.userId}`;
-      const result = await tx.insert(confessions).values(insertConfession).returning();
-      return result[0];
+  async createConfession(insertConfession: InsertConfession, role: string = 'user'): Promise<Confession> {
+    return await runAs({ id: insertConfession.userId, role }, async (client) => {
+      const result = await client.query(
+        `INSERT INTO confessions (user_id, content, source) 
+         VALUES ($1, $2, $3) 
+         RETURNING *`,
+        [insertConfession.userId, insertConfession.content, insertConfession.source || 'user']
+      );
+      return result.rows[0];
     });
   }
 
-  async getConfessionsByUserId(userId: string, limit: number = 100): Promise<Confession[]> {
-    return await db.transaction(async (tx) => {
-      await sql`SET LOCAL app.user_id = ${userId}`;
-      return await tx.select()
-        .from(confessions)
-        .where(eq(confessions.userId, userId))
-        .orderBy(desc(confessions.createdAt))
-        .limit(limit);
+  async getConfessionsByUserId(userId: string, role: string = 'user', limit: number = 100): Promise<Confession[]> {
+    return await runAs({ id: userId, role }, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM confessions 
+         WHERE user_id = $1 
+         ORDER BY created_at DESC 
+         LIMIT $2`,
+        [userId, limit]
+      );
+      return result.rows;
     });
   }
 
-  async getConfessionCount(userId: string): Promise<number> {
-    return await db.transaction(async (tx) => {
-      await sql`SET LOCAL app.user_id = ${userId}`;
-      const result = await tx.select().from(confessions).where(eq(confessions.userId, userId));
-      return result.length;
+  async getConfessionCount(userId: string, role: string = 'user'): Promise<number> {
+    return await runAs({ id: userId, role }, async (client) => {
+      const result = await client.query(
+        `SELECT COUNT(*) as count FROM confessions WHERE user_id = $1`,
+        [userId]
+      );
+      return parseInt(result.rows[0].count, 10);
     });
   }
 
-  async deleteConfession(id: string, userId: string): Promise<boolean> {
-    return await db.transaction(async (tx) => {
-      await sql`SET LOCAL app.user_id = ${userId}`;
-      const result = await tx.delete(confessions)
-        .where(and(eq(confessions.id, id), eq(confessions.userId, userId)))
-        .returning();
-      return result.length > 0;
+  async deleteConfession(id: string, userId: string, role: string = 'user'): Promise<boolean> {
+    return await runAs({ id: userId, role }, async (client) => {
+      const result = await client.query(
+        `DELETE FROM confessions WHERE id = $1 AND user_id = $2 RETURNING *`,
+        [id, userId]
+      );
+      return result.rows.length > 0;
     });
   }
 
