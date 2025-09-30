@@ -1,27 +1,132 @@
 import OpenAI from "openai";
-import { storage } from "./storage";
+import { LRUCache } from "lru-cache";
+import crypto from "crypto";
 
-if (!process.env.OPENAI_API_KEY) {
-  throw new Error('Missing required environment variable: OPENAI_API_KEY');
-}
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+const BASE_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+const SYSTEM_BASE = "Tu es l'assistant d'Intimaia. Réponds bref, clair, utile.";
+const DEFAULT_TEMP = 0.4;
+
+const aiCache = new LRUCache<string, string>({
+  max: 500,
+  ttl: 1000 * 60 * 20,
 });
 
-const AI_MODEL = process.env.AI_MODEL || "gpt-4o-mini";
-const AI_MAX_TOKENS = parseInt(process.env.AI_MAX_TOKENS || "256");
-const AI_MONTHLY_HARDCAP_EUR = parseFloat(process.env.AI_MONTHLY_HARDCAP_EUR || "20");
-const AI_SOFTCAP_WARN_EUR = parseFloat(process.env.AI_SOFTCAP_WARN_EUR || "18");
-const FX_USD_EUR = parseFloat(process.env.FX_USD_EUR || "0.92");
-const FEATURE_AI = process.env.FEATURE_AI !== 'false';
+function cacheKey(userId: string, input: string, extra?: string) {
+  const norm = (s: string) => s.trim().toLowerCase();
+  const raw = `${userId}|${norm(input)}|${norm(extra ?? "")}`;
+  return crypto.createHash("sha1").update(raw).digest("hex");
+}
 
-interface AIAnalysis {
-  summary: string;
-  tags: string[];
-  intensity: number;
-  reply: string;
-  source: 'ai' | 'heuristic';
+type Budget = { euros: number; month: string };
+const PRICE_PER_1K = Number(process.env.AI_PRICE_PER_1K ?? 0.15);
+const CAP_EUR = Number(process.env.AI_CAP_EUR ?? 20);
+const ALERT_EUR = Number(process.env.AI_ALERT_EUR ?? 18);
+
+let budget: Budget = { euros: 0, month: new Date().toISOString().slice(0, 7) };
+
+function rolloverMonth() {
+  const nowMonth = new Date().toISOString().slice(0, 7);
+  if (nowMonth !== budget.month) budget = { euros: 0, month: nowMonth };
+}
+function addUsage(tokensIn: number, tokensOut: number) {
+  rolloverMonth();
+  const euros = ((tokensIn + tokensOut) / 1000) * PRICE_PER_1K;
+  budget.euros += euros;
+  return budget.euros;
+}
+export function getBudget() {
+  rolloverMonth();
+  return { ...budget, cap: CAP_EUR, alert: ALERT_EUR };
+}
+export function aiAllowed() {
+  rolloverMonth();
+  return budget.euros < CAP_EUR;
+}
+
+type AskMiniOpts = {
+  userId: string;
+  input: string;
+  system?: string;
+  temperature?: number;
+  maxTokens?: number;
+  cacheTtlMs?: number;
+  signal?: AbortSignal;
+};
+
+export async function askMini(opts: AskMiniOpts): Promise<string> {
+  const {
+    userId,
+    input,
+    system = SYSTEM_BASE,
+    temperature = DEFAULT_TEMP,
+    maxTokens = 250,
+    cacheTtlMs,
+    signal,
+  } = opts;
+
+  const k = cacheKey(userId, input, system);
+  const cached = aiCache.get(k);
+  if (cached) return cached;
+
+  if (!aiAllowed()) return fallbackAnswer(input, "budget");
+
+  try {
+    const res = await client.chat.completions.create({
+      model: BASE_MODEL,
+      temperature,
+      max_tokens: maxTokens,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: input },
+      ],
+    }, signal ? { signal } : undefined);
+
+    const choice = res.choices?.[0]?.message?.content?.trim() ?? "";
+    const inTok = (res.usage?.prompt_tokens ?? 0);
+    const outTok = (res.usage?.completion_tokens ?? 0);
+    addUsage(inTok, outTok);
+
+    if (budget.euros >= ALERT_EUR) {
+      console.warn(`[AI] ALERT nearing cap: €${budget.euros.toFixed(2)}/${CAP_EUR}`);
+    }
+
+    aiCache.set(k, choice, { ttl: cacheTtlMs ?? aiCache.ttl });
+    return choice || fallbackAnswer(input, "empty");
+  } catch (e) {
+    console.error("[AI] askMini error:", e);
+    return fallbackAnswer(input, "error");
+  }
+}
+
+type AskConfessionOpts = {
+  userId: string;
+  text: string;
+};
+
+const CONFESSION_SYSTEM =
+  "Tu analyses un texte intime et renvoies des conseils brefs, doux, concrets. 3 points max.";
+
+export async function askConfession({ userId, text }: AskConfessionOpts) {
+  const userPrompt =
+    `Analyse ce texte (max 3 bullet points concrets, style apaisant) :\n` +
+    truncate(text, 800);
+
+  const answer = await askMini({
+    userId,
+    input: userPrompt,
+    system: CONFESSION_SYSTEM,
+    maxTokens: 220,
+    temperature: 0.3,
+  });
+
+  return {
+    ok: true,
+    type: "confession_advice",
+    data: { advice: answer },
+    budget: getBudget(),
+  };
 }
 
 interface ModerationResult {
@@ -31,7 +136,7 @@ interface ModerationResult {
 
 export async function moderateContent(content: string): Promise<ModerationResult> {
   try {
-    const moderation = await openai.moderations.create({
+    const moderation = await client.moderations.create({
       input: content,
     });
 
@@ -55,76 +160,32 @@ export async function moderateContent(content: string): Promise<ModerationResult
   }
 }
 
-export async function analyzeConfession(content: string, userId: string): Promise<AIAnalysis> {
-  if (!FEATURE_AI) {
-    return generateHeuristicAnalysis(content);
-  }
+interface AIAnalysis {
+  summary: string;
+  tags: string[];
+  intensity: number;
+  reply: string;
+  source: 'ai' | 'heuristic';
+}
 
-  const currentMonth = new Date().toISOString().substring(0, 7);
-  const usage = await storage.getAiUsageByMonth(currentMonth);
-  
-  if (usage && parseFloat(usage.estCostEur) >= AI_MONTHLY_HARDCAP_EUR) {
-    console.log(`AI hardcap reached for ${currentMonth}, using heuristic fallback`);
+export async function analyzeConfession(content: string, userId: string): Promise<AIAnalysis> {
+  if (!aiAllowed()) {
     return generateHeuristicAnalysis(content);
   }
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      max_tokens: AI_MAX_TOKENS,
-      temperature: 0.7,
-      messages: [
-        {
-          role: "system",
-          content: `Tu es un assistant empathique qui analyse des confessions personnelles. Réponds UNIQUEMENT en JSON avec cette structure:
-{
-  "summary": "résumé en 1-2 phrases",
-  "tags": ["tag1", "tag2", "tag3"],
-  "intensity": 5,
-  "reply": "réponse bienveillante et encourageante"
-}
-
-- summary: résumé concis de la confession
-- tags: 2-4 tags émotionnels (ex: anxiété, joie, tristesse, colère, espoir)
-- intensity: niveau d'intensité émotionnelle de 0 (calme) à 10 (très intense)
-- reply: réponse empathique et encourageante en 2-3 phrases`
-        },
-        {
-          role: "user",
-          content: content
-        }
-      ]
-    });
-
-    const response = completion.choices[0]?.message?.content;
+    const result = await askConfession({ userId, text: content });
     
-    if (!response) {
-      throw new Error('No response from AI');
-    }
-
-    const analysis = JSON.parse(response);
+    const tags = extractTags(content);
+    const intensity = estimateIntensity(content);
     
-    const inputTokens = completion.usage?.prompt_tokens || 0;
-    const outputTokens = completion.usage?.completion_tokens || 0;
-    
-    const costUSD = (inputTokens * 0.00015 + outputTokens * 0.0006) / 1000;
-    const costEUR = (costUSD * FX_USD_EUR).toFixed(4);
-
-    await storage.createOrUpdateAiUsage({
-      month: currentMonth,
-      inputTokensToAdd: inputTokens,
-      outputTokensToAdd: outputTokens,
-      costToAdd: costEUR,
-    });
-
     return {
-      summary: analysis.summary || '',
-      tags: (analysis.tags || []).slice(0, 4),
-      intensity: Math.min(10, Math.max(0, analysis.intensity || 5)),
-      reply: analysis.reply || '',
+      summary: truncate(content, 100),
+      tags,
+      intensity,
+      reply: result.data.advice,
       source: 'ai'
     };
-    
   } catch (error: any) {
     console.error('AI analysis error:', error.message);
     return generateHeuristicAnalysis(content);
@@ -189,23 +250,72 @@ function generateHeuristicAnalysis(content: string): AIAnalysis {
   };
 }
 
+function extractTags(text: string): string[] {
+  const words = text.toLowerCase();
+  const emotionKeywords = {
+    tristesse: ['triste', 'déprim', 'pleur'],
+    anxiété: ['anxie', 'stress', 'peur'],
+    colère: ['colère', 'énervé', 'furieu'],
+    joie: ['heureu', 'joie', 'content'],
+  };
+
+  const tags: string[] = [];
+  for (const [emotion, keywords] of Object.entries(emotionKeywords)) {
+    if (keywords.some(k => words.includes(k))) {
+      tags.push(emotion);
+    }
+  }
+  return tags.length > 0 ? tags.slice(0, 3) : ['réflexion'];
+}
+
+function estimateIntensity(text: string): number {
+  const length = text.length;
+  const exclamations = (text.match(/!/g) || []).length;
+  const questions = (text.match(/\?/g) || []).length;
+  return Math.min(10, Math.max(1, Math.floor(length / 100 + exclamations * 2 + questions)));
+}
+
+function fallbackAnswer(input: string, reason: "budget" | "error" | "empty") {
+  const base =
+    reason === "budget"
+      ? "Mode éco activé : réponse courte sans IA."
+      : "Réponse courte (hors-ligne).";
+  const s = summarizeOneLine(input);
+  return `${base} ${s ? "Idée clé : " + s : ""}`.trim();
+}
+
+function summarizeOneLine(t: string): string {
+  const one = t.replace(/\s+/g, " ").trim();
+  if (!one) return "";
+  return one.split(" ").slice(0, 22).join(" ");
+}
+
+function truncate(s: string, max: number) {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 3) + "...";
+}
+
 export async function checkAIBudget(): Promise<{ available: boolean; usage?: any; warning?: boolean }> {
-  const currentMonth = new Date().toISOString().substring(0, 7);
-  const usage = await storage.getAiUsageByMonth(currentMonth);
+  rolloverMonth();
+  const budgetInfo = getBudget();
   
-  if (!usage) {
-    return { available: true };
+  if (budgetInfo.euros >= budgetInfo.cap) {
+    return { 
+      available: false, 
+      usage: { estCostEur: budgetInfo.euros.toFixed(2), month: budgetInfo.month }
+    };
   }
 
-  const cost = parseFloat(usage.estCostEur);
-  
-  if (cost >= AI_MONTHLY_HARDCAP_EUR) {
-    return { available: false, usage };
+  if (budgetInfo.euros >= budgetInfo.alert) {
+    return { 
+      available: true, 
+      usage: { estCostEur: budgetInfo.euros.toFixed(2), month: budgetInfo.month },
+      warning: true 
+    };
   }
 
-  if (cost >= AI_SOFTCAP_WARN_EUR) {
-    return { available: true, usage, warning: true };
-  }
-
-  return { available: true, usage };
+  return { 
+    available: true, 
+    usage: { estCostEur: budgetInfo.euros.toFixed(2), month: budgetInfo.month }
+  };
 }

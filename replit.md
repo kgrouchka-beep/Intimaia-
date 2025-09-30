@@ -14,6 +14,14 @@ Intimaia is a Node.js/Express backend for an AI-augmented intimate journal appli
   - Policy: `confessions_owner_isolation` - Users can only access their own confessions
   - Policy: `confessions_admin_bypass` - Admins can access all confessions
   - Implementation: Database queries wrapped in transactions with `SET LOCAL app.user_id` and `SET LOCAL app.role`
+  - Uses pg Pool `runAs` pattern for explicit transaction and session variable management
+
+### OpenAI Implementation Refactor
+- **LRU Cache**: Added 20-minute caching to avoid repetitive API calls (500 item limit)
+- **In-memory Budget Tracking**: Simplified budget system with monthly rollover (CAP_EUR, ALERT_EUR)
+- **Generic `askMini` Helper**: Reusable AI function with configurable system prompts, temperature, tokens
+- **Specialized `askConfession`**: Optimized function for confession analysis with token limits
+- **Simplified Fallback**: Heuristic responses when budget exceeded or errors occur
 
 ### Authentication Endpoints
 - `GET /api/login` - Initiates Replit Auth login flow
