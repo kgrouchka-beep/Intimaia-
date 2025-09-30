@@ -12,8 +12,8 @@ export async function runAs(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(`SET LOCAL app.user_id = $1`, [user.id]);
-    await client.query(`SET LOCAL app.role = $1`, [user.role || 'user']);
+    await client.query(`SET LOCAL app.user_id = '${user.id.replace(/'/g, "''")}'`);
+    await client.query(`SET LOCAL app.role = '${(user.role || 'user').replace(/'/g, "''")}'`);
     const res = await fn(client);
     await client.query('COMMIT');
     return res;

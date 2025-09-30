@@ -107,7 +107,16 @@ export class DbStorage implements IStorage {
       const result = await client.query(
         `INSERT INTO confessions (user_id, content, source) 
          VALUES ($1, $2, $3) 
-         RETURNING *`,
+         RETURNING 
+           id, 
+           user_id as "userId", 
+           content, 
+           ai_summary as "aiSummary", 
+           ai_tags as "aiTags", 
+           ai_intensity as "aiIntensity", 
+           ai_reply as "aiReply", 
+           source, 
+           created_at as "createdAt"`,
         [insertConfession.userId, insertConfession.content, insertConfession.source || 'user']
       );
       return result.rows[0];
@@ -117,7 +126,17 @@ export class DbStorage implements IStorage {
   async getConfessionsByUserId(userId: string, role: string = 'user', limit: number = 100): Promise<Confession[]> {
     return await runAs({ id: userId, role }, async (client) => {
       const result = await client.query(
-        `SELECT * FROM confessions 
+        `SELECT 
+           id, 
+           user_id as "userId", 
+           content, 
+           ai_summary as "aiSummary", 
+           ai_tags as "aiTags", 
+           ai_intensity as "aiIntensity", 
+           ai_reply as "aiReply", 
+           source, 
+           created_at as "createdAt"
+         FROM confessions 
          WHERE user_id = $1 
          ORDER BY created_at DESC 
          LIMIT $2`,
