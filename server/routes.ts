@@ -9,6 +9,7 @@ import { moderateContent, analyzeConfession, checkAIBudget } from "./openai";
 import { confessionSchema, emailSubscribeSchema } from "./validation";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
+import { confessionsRouter } from "./routes/confessions";
 
 if (!process.env.STRIPE_SECRET_KEY) {
   throw new Error('Missing required environment variable: STRIPE_SECRET_KEY');
@@ -454,6 +455,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ error: error.message });
     }
   });
+
+  app.use("/api/confessions", confessionsRouter);
 
   const httpServer = createServer(app);
 
