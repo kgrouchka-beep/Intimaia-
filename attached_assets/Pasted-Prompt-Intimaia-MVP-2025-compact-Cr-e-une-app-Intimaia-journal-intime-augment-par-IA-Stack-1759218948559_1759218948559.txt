@@ -1,0 +1,49 @@
+Prompt Intimaia – MVP 2025 (compact)
+
+Crée une app “Intimaia”, journal intime augmenté par IA.
+Stack : Replit + Supabase + Stripe + OpenAI.
+Objectif : MVP simple, sécurisé, Free/Premium, IA cadrée, UX 2025.
+	1.	Backend/Auth : API REST (Express.js). Auth Supabase (email/password). Rate limiting : 10 req/min IP non-auth, 100 req/min user.
+	2.	DB Supabase (RLS activé) :
+
+	•	confessions : id, user_id, content, ai_summary, ai_tags, ai_intensity (1–10), ai_reply. Policies RLS : user voit/insère/supprime seulement ses données.
+	•	ai_usage : month, tokens, est_cost_eur (maj en transaction pour éviter race condition).
+	•	emails : id, user_id, email. RLS activé.
+
+	3.	Stripe : plan Premium 9,99 €/mois (PriceID existant). Endpoints :
+
+	•	/checkout (création session),
+	•	/webhook (⚠️ vérif signature Stripe obligatoire),
+	•	/billing/portal.
+
+	4.	Free vs Premium : MAX_FREE_CONFESSIONS=30. Ensuite → invitation à upgrade Premium (met en avant valeur émotionnelle, pas juste “débloquer plus”).
+	5.	IA (gpt-4o-mini) :
+Env Vars : AI_MODEL=gpt-4o-mini, AI_MAX_TOKENS=256, AI_MONTHLY_HARDCAP_EUR=20.
+Pipeline : valider input (10–5000 char), modération OpenAI (bloque contenu sensible), timeout 10s.
+Si cap atteint ou IA down → fallback heuristique (mots-clés émotionnels FR).
+	6.	Prompt IA :
+Réponds uniquement en JSON strict :
+{ summary: 2 phrases max, tags: [2–4 mots-clés], intensity: 1–10, reply: courte ≤18 mots, poétique/bienveillante }.
+Interdits : politique, sexe explicite, violence, religion, médical/psy.
+	7.	Admin/Stats : endpoint /api/admin/stats (JWT admin ou IP whitelist). Retourne nb users, confessions, usage IA, conversions, modérations. Rate limiting 10 req/min.
+	8.	PWA & Offline : manifest + serviceWorker. Cache : network-first (API), cache-first (assets). Offline : stocker confessions en local (IndexedDB) + sync auto. Variable MAINTENANCE_MODE=true → tous endpoints renvoient “En maintenance”.
+	9.	Sécurité & RGPD : Helmet, CORS strict, pas d’expo de clés côté client. Logs Pino/Winston. DELETE /api/me → supprime compte et données. GET /api/me/export → export JSON complet. Emails validés regex stricte + rejet domaines jetables.
+	10.	Monitoring : logs auth fails, erreurs Stripe, cap IA >90%, contenus modérés. Alertes admin (email) si cap dépassé ou erreur critique.
+	11.	Tests obligatoires :
+
+	•	User A ≠ User B (RLS ok).
+	•	Webhook Stripe signature invalide → 400.
+	•	Cap IA atteint → fallback OK.
+	•	Export RGPD complet.
+	•	Modération bloque contenu sensible.
+	•	Mode offline sync OK.
+	•	Rate limiting actif.
+
+Checklist UX 2025 (à valider/implémenter) :
+	1.	Comment afficher intensité (1–10) + réponse poétique courte sans ton “corporate wellness” ?
+	2.	Quel pattern convertit le mieux Premium : bloqueur strict ou différer confession en valorisant profondeur ?
+	3.	Quel signal rassure en mode offline (badge, animation, micro-message) ?
+	4.	Quelle visualisation tendance pour évolution long terme (Mood Arc, carte thèmes, timeline) ?
+	5.	Quelle interface rend le cap IA transparent et positif (jauge, badge éthique) ?
+
+Résultat attendu : API fonctionnelle, DB sécurisée (RLS), Stripe branché, IA avec cap 20 €/mois, PWA offline, monitoring/alertes, landing page simple avec collecte email, UX différenciante.

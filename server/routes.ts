@@ -147,7 +147,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } else {
       log(`🚀 Intimaia Backend running on port ${port}`);
       log(`🔗 Health Check: http://localhost:${port}/api/health`);
-      log(`🎯 Stripe Webhook: http://localhost:${port}/api/webhook/stripe`);
+      log(`🎯 Stripe Webhook: http://localhost:$({port}/api/webhook/stripe`);
     }
     
     return result;
