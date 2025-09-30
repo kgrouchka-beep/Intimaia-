@@ -68,9 +68,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(401).json({ error: 'Not authenticated' });
       }
 
+      const user = await storage.getUser(userId);
+      const userRole = user?.isAdmin ? 'admin' : 'user';
       const subscriptions = await storage.getUserSubscriptions(userId);
       const activeSubscription = subscriptions.find(s => s.status === 'active');
-      const confessionCount = await storage.getConfessionCount(userId);
+      const confessionCount = await storage.getConfessionCount(userId, userRole);
 
       res.json({
         id: userId,
@@ -93,7 +95,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(401).json({ error: 'Not authenticated' });
       }
 
-      const confessions = await storage.getConfessionsByUserId(userId, 10000);
+      const user = await storage.getUser(userId);
+      const userRole = user?.isAdmin ? 'admin' : 'user';
+      const confessions = await storage.getConfessionsByUserId(userId, userRole, 10000);
       const subscriptions = await storage.getUserSubscriptions(userId);
 
       const exportData = {
@@ -146,7 +150,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      const confessionCount = await storage.getConfessionCount(userId);
+      const user = await storage.getUser(userId);
+      const userRole = user?.isAdmin ? 'admin' : 'user';
+      const confessionCount = await storage.getConfessionCount(userId, userRole);
       const subscriptions = await storage.getUserSubscriptions(userId);
       const isPremium = subscriptions.some(s => s.status === 'active');
 
@@ -156,13 +162,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           limit: MAX_FREE_CONFESSIONS 
         });
       }
-
       const analysis = await analyzeConfession(content, userId);
 
       const confession = await storage.createConfession({
         userId,
         content,
-      });
+      }, userRole);
 
       if (analysis) {
         await storage.updateConfessionAiData(confession.id, {
@@ -197,8 +202,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(401).json({ error: 'Not authenticated' });
       }
 
+      const user = await storage.getUser(userId);
+      const userRole = user?.isAdmin ? 'admin' : 'user';
       const limit = parseInt(req.query.limit as string) || 50;
-      const confessions = await storage.getConfessionsByUserId(userId, limit);
+      const confessions = await storage.getConfessionsByUserId(userId, userRole, limit);
 
       res.json({ confessions });
     } catch (error: any) {
@@ -214,8 +221,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(401).json({ error: 'Not authenticated' });
       }
 
+      const user = await storage.getUser(userId);
+      const userRole = user?.isAdmin ? 'admin' : 'user';
       const { id } = req.params;
-      const deleted = await storage.deleteConfession(id, userId);
+      const deleted = await storage.deleteConfession(id, userId, userRole);
 
       if (!deleted) {
         return res.status(404).json({ error: 'Confession not found or not authorized' });
