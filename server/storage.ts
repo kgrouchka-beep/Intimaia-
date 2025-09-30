@@ -102,28 +102,40 @@ export class DbStorage implements IStorage {
 
   // Confession methods
   async createConfession(insertConfession: InsertConfession): Promise<Confession> {
-    const result = await db.insert(confessions).values(insertConfession).returning();
-    return result[0];
+    return await db.transaction(async (tx) => {
+      await sql`SET LOCAL app.user_id = ${insertConfession.userId}`;
+      const result = await tx.insert(confessions).values(insertConfession).returning();
+      return result[0];
+    });
   }
 
   async getConfessionsByUserId(userId: string, limit: number = 100): Promise<Confession[]> {
-    return await db.select()
-      .from(confessions)
-      .where(eq(confessions.userId, userId))
-      .orderBy(desc(confessions.createdAt))
-      .limit(limit);
+    return await db.transaction(async (tx) => {
+      await sql`SET LOCAL app.user_id = ${userId}`;
+      return await tx.select()
+        .from(confessions)
+        .where(eq(confessions.userId, userId))
+        .orderBy(desc(confessions.createdAt))
+        .limit(limit);
+    });
   }
 
   async getConfessionCount(userId: string): Promise<number> {
-    const result = await db.select().from(confessions).where(eq(confessions.userId, userId));
-    return result.length;
+    return await db.transaction(async (tx) => {
+      await sql`SET LOCAL app.user_id = ${userId}`;
+      const result = await tx.select().from(confessions).where(eq(confessions.userId, userId));
+      return result.length;
+    });
   }
 
   async deleteConfession(id: string, userId: string): Promise<boolean> {
-    const result = await db.delete(confessions)
-      .where(and(eq(confessions.id, id), eq(confessions.userId, userId)))
-      .returning();
-    return result.length > 0;
+    return await db.transaction(async (tx) => {
+      await sql`SET LOCAL app.user_id = ${userId}`;
+      const result = await tx.delete(confessions)
+        .where(and(eq(confessions.id, id), eq(confessions.userId, userId)))
+        .returning();
+      return result.length > 0;
+    });
   }
 
   async updateConfessionAiData(id: string, aiData: {

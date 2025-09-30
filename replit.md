@@ -9,7 +9,11 @@ Intimaia is a Node.js/Express backend for an AI-augmented intimate journal appli
 - **Session Management**: Now uses express-session with PostgreSQL session store
 - **User Management**: User data stored in local PostgreSQL database instead of Supabase auth.users
 - **Routes Updated**: All protected routes now use `isAuthenticated` middleware from Replit Auth
-- **Admin Routes**: Admin endpoints temporarily use standard authentication (admin role checking to be implemented)
+- **Admin System**: Implemented `isAdmin` middleware that checks `is_admin` column in users table
+- **Row Level Security**: Enabled RLS on confessions table with policies using PostgreSQL session variables
+  - Policy: `confessions_owner_isolation` - Users can only access their own confessions
+  - Policy: `confessions_admin_bypass` - Admins can access all confessions
+  - Implementation: Database queries wrapped in transactions with `SET LOCAL app.user_id` and `SET LOCAL app.role`
 
 ### Authentication Endpoints
 - `GET /api/login` - Initiates Replit Auth login flow
@@ -18,13 +22,14 @@ Intimaia is a Node.js/Express backend for an AI-augmented intimate journal appli
 
 ## Tech Stack
 - **Backend**: Node.js, Express, TypeScript
-- **Database**: PostgreSQL (Supabase-hosted)
+- **Database**: PostgreSQL (heliumdb - local Replit database)
 - **ORM**: Drizzle ORM
 - **Authentication**: Replit Auth (OpenID Connect)
 - **Session Store**: PostgreSQL via connect-pg-simple
 - **Payments**: Stripe
 - **AI**: OpenAI GPT-4
 - **Frontend**: React, Vite, TanStack Query, Wouter
+- **Security**: Row Level Security (RLS) with PostgreSQL session variables
 
 ## Database Schema
 
@@ -34,6 +39,7 @@ Intimaia is a Node.js/Express backend for an AI-augmented intimate journal appli
 - `firstName` (varchar) - First name
 - `lastName` (varchar) - Last name
 - `profileImageUrl` (varchar) - Profile image URL
+- `isAdmin` (boolean) - Admin status (default: false)
 - `createdAt` (timestamp) - Account creation date
 - `updatedAt` (timestamp) - Last update date
 
@@ -42,7 +48,7 @@ Intimaia is a Node.js/Express backend for an AI-augmented intimate journal appli
 - `sess` (jsonb) - Session data
 - `expire` (timestamp) - Expiration timestamp
 
-### Confessions Table
+### Confessions Table (RLS Enabled)
 - `id` (uuid, primary key) - Confession ID
 - `userId` (varchar) - User ID
 - `content` (text) - Confession content
@@ -52,6 +58,7 @@ Intimaia is a Node.js/Express backend for an AI-augmented intimate journal appli
 - `aiReply` (text) - AI-generated empathetic reply
 - `source` (text) - "openai" or "heuristic"
 - `createdAt` (timestamp) - Creation date
+- **RLS Policies**: Owner isolation + Admin bypass using session variables
 
 ### Users Subscriptions Table
 - `id` (uuid, primary key) - Subscription ID
@@ -151,10 +158,19 @@ Intimaia is a Node.js/Express backend for an AI-augmented intimate journal appli
 - Drizzle ORM for type-safe queries
 
 ### Middleware
-- `isAuthenticated` - Validates Replit Auth session
+- `isAuthenticated` - Validates Replit Auth session with token refresh
+- `isAdmin` - Checks if user has admin privileges (requires `is_admin = true`)
 - `limiterAuth` - Rate limiting for auth endpoints (30 req/min)
 - `limiterGeneral` - Rate limiting for general endpoints (100 req/min)
 - Helmet for security headers
+
+### Row Level Security (RLS)
+- **Implementation**: PostgreSQL session variables (`app.user_id`, `app.role`)
+- **Transaction Wrapping**: All confession queries wrapped in transactions with `SET LOCAL` statements
+- **Policies**:
+  - `confessions_owner_isolation`: `user_id::text = current_setting('app.user_id', true)`
+  - `confessions_admin_bypass`: `current_setting('app.role', true) = 'admin'`
+- **Admin Access**: Users with `is_admin = true` can bypass RLS policies
 
 ## Development
 
@@ -171,8 +187,18 @@ npm run db:push
 ### Testing
 Health check: `GET /api/health`
 
+## Admin Setup
+To grant admin access to a user:
+```sql
+UPDATE users SET is_admin = true WHERE email = 'user@example.com';
+```
+Current admin: k.grouchka@gmail.com
+
+## Known Issues
+- **Stripe Configuration**: STRIPE_PRICE_ID currently contains product ID instead of price ID (needs correction)
+
 ## TODO
-- [ ] Implement proper admin role checking (currently all authenticated users can access admin endpoints)
+- [ ] Fix STRIPE_PRICE_ID to use actual price ID instead of product ID
 - [ ] Add frontend authentication UI
 - [ ] Implement user profile management
 - [ ] Add email verification flow
