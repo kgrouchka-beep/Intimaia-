@@ -29,9 +29,10 @@ const databaseUrl = process.env.DATABASE_URL;
 console.log(`[DB] Connecting to: ${databaseUrl.replace(/:[^:@]+@/, ':****@')}`);
 
 const sql = postgres(databaseUrl, {
-  max: 10,
+  max: 1,
   idle_timeout: 20,
-  connect_timeout: 10,
+  connect_timeout: 30,
+  prepare: false,
 });
 
 export const db = drizzle(sql);
