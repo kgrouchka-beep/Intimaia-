@@ -1,12 +1,12 @@
-import type { Express } from "express";
+import type { Express, Request } from "express";
 import { createServer, type Server } from "http";
 import Stripe from "stripe";
 import { storage } from "./storage";
 import { insertSubscriptionSchema, insertConfessionSchema, insertEmailSchema } from "@shared/schema";
 import { log } from "./vite";
-import { requireAuth, requireAdmin, optionalAuth, supabase, type AuthRequest } from "./auth";
+import { isAuthenticated, getUserId, getUserEmail } from "./replitAuth";
 import { moderateContent, analyzeConfession, checkAIBudget } from "./openai";
-import { confessionSchema, emailSubscribeSchema, signupSchema, loginSchema } from "./validation";
+import { confessionSchema, emailSubscribeSchema } from "./validation";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 
@@ -50,8 +50,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     contentSecurityPolicy: false,
   }));
 
-  app.use(optionalAuth as any);
-
   app.get("/api/health", async (req, res) => {
     try {
       res.json({ ok: true });
@@ -61,80 +59,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/auth/signup", limiterAuth, async (req, res) => {
+  app.get("/api/me", isAuthenticated, async (req: Request, res) => {
     try {
-      const { email, password } = signupSchema.parse(req.body);
+      const userId = getUserId(req);
+      const userEmail = getUserEmail(req);
       
-      const { data, error } = await supabase.auth.signUp({
-        email,
-        password,
-      });
-
-      if (error) {
-        return res.status(400).json({ error: error.message });
-      }
-
-      res.json({ 
-        user: data.user, 
-        session: data.session,
-        message: 'Signup successful' 
-      });
-    } catch (error: any) {
-      res.status(400).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/auth/login", limiterAuth, async (req, res) => {
-    try {
-      const { email, password } = loginSchema.parse(req.body);
-      
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-
-      if (error) {
-        return res.status(401).json({ error: error.message });
-      }
-
-      res.json({ 
-        user: data.user, 
-        session: data.session,
-        message: 'Login successful' 
-      });
-    } catch (error: any) {
-      res.status(400).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/auth/logout", requireAuth as any, async (req: AuthRequest, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader?.substring(7);
-
-      if (token) {
-        await supabase.auth.admin.signOut(token);
-      }
-
-      res.json({ message: 'Logout successful' });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.get("/api/me", requireAuth as any, async (req: AuthRequest, res) => {
-    try {
-      if (!req.user) {
+      if (!userId) {
         return res.status(401).json({ error: 'Not authenticated' });
       }
 
-      const subscriptions = await storage.getUserSubscriptions(req.user.id);
+      const subscriptions = await storage.getUserSubscriptions(userId);
       const activeSubscription = subscriptions.find(s => s.status === 'active');
-      const confessionCount = await storage.getConfessionCount(req.user.id);
+      const confessionCount = await storage.getConfessionCount(userId);
 
       res.json({
-        id: req.user.id,
-        email: req.user.email,
+        id: userId,
+        email: userEmail,
         isPremium: !!activeSubscription,
         confessionCount,
         subscription: activeSubscription || null,
@@ -144,19 +84,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/me/export", requireAuth as any, async (req: AuthRequest, res) => {
+  app.get("/api/me/export", isAuthenticated, async (req: Request, res) => {
     try {
-      if (!req.user) {
+      const userId = getUserId(req);
+      const userEmail = getUserEmail(req);
+      
+      if (!userId) {
         return res.status(401).json({ error: 'Not authenticated' });
       }
 
-      const confessions = await storage.getConfessionsByUserId(req.user.id, 10000);
-      const subscriptions = await storage.getUserSubscriptions(req.user.id);
+      const confessions = await storage.getConfessionsByUserId(userId, 10000);
+      const subscriptions = await storage.getUserSubscriptions(userId);
 
       const exportData = {
         user: {
-          id: req.user.id,
-          email: req.user.email,
+          id: userId,
+          email: userEmail,
           exportDate: new Date().toISOString(),
         },
         confessions: confessions.map(c => ({
@@ -178,16 +121,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
       };
 
       res.setHeader('Content-Type', 'application/json');
-      res.setHeader('Content-Disposition', `attachment; filename="intimaia-export-${req.user.id}.json"`);
+      res.setHeader('Content-Disposition', `attachment; filename="intimaia-export-${userId}.json"`);
       res.json(exportData);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
-  app.post("/api/confess", limiterGeneral, requireAuth as any, async (req: AuthRequest, res) => {
+  app.post("/api/confess", limiterGeneral, isAuthenticated, async (req: Request, res) => {
     try {
-      if (!req.user) {
+      const userId = getUserId(req);
+      
+      if (!userId) {
         return res.status(401).json({ error: 'Not authenticated' });
       }
 
@@ -201,8 +146,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      const confessionCount = await storage.getConfessionCount(req.user.id);
-      const subscriptions = await storage.getUserSubscriptions(req.user.id);
+      const confessionCount = await storage.getConfessionCount(userId);
+      const subscriptions = await storage.getUserSubscriptions(userId);
       const isPremium = subscriptions.some(s => s.status === 'active');
 
       if (!isPremium && confessionCount >= MAX_FREE_CONFESSIONS) {
@@ -212,10 +157,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      const analysis = await analyzeConfession(content, req.user.id);
+      const analysis = await analyzeConfession(content, userId);
 
       const confession = await storage.createConfession({
-        userId: req.user.id,
+        userId,
         content,
       });
 
@@ -244,14 +189,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/confessions", requireAuth as any, async (req: AuthRequest, res) => {
+  app.get("/api/confessions", isAuthenticated, async (req: Request, res) => {
     try {
-      if (!req.user) {
+      const userId = getUserId(req);
+      
+      if (!userId) {
         return res.status(401).json({ error: 'Not authenticated' });
       }
 
       const limit = parseInt(req.query.limit as string) || 50;
-      const confessions = await storage.getConfessionsByUserId(req.user.id, limit);
+      const confessions = await storage.getConfessionsByUserId(userId, limit);
 
       res.json({ confessions });
     } catch (error: any) {
@@ -259,14 +206,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.delete("/api/confessions/:id", requireAuth as any, async (req: AuthRequest, res) => {
+  app.delete("/api/confessions/:id", isAuthenticated, async (req: Request, res) => {
     try {
-      if (!req.user) {
+      const userId = getUserId(req);
+      
+      if (!userId) {
         return res.status(401).json({ error: 'Not authenticated' });
       }
 
       const { id } = req.params;
-      const deleted = await storage.deleteConfession(id, req.user.id);
+      const deleted = await storage.deleteConfession(id, userId);
 
       if (!deleted) {
         return res.status(404).json({ error: 'Confession not found or not authorized' });
@@ -278,9 +227,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/checkout", requireAuth as any, async (req: AuthRequest, res) => {
+  app.post("/api/checkout", isAuthenticated, async (req: Request, res) => {
     try {
-      if (!req.user) {
+      const userId = getUserId(req);
+      
+      if (!userId) {
         return res.status(401).json({ error: 'Not authenticated' });
       }
 
@@ -295,9 +246,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         ],
         success_url: `${req.headers.origin || 'http://localhost:5000'}/success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${req.headers.origin || 'http://localhost:5000'}/pricing`,
-        client_reference_id: req.user.id,
+        client_reference_id: userId,
         metadata: {
-          user_id: req.user.id,
+          user_id: userId,
         },
       });
 
@@ -307,13 +258,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/billing/portal", requireAuth as any, async (req: AuthRequest, res) => {
+  app.post("/api/billing/portal", isAuthenticated, async (req: Request, res) => {
     try {
-      if (!req.user) {
+      const userId = getUserId(req);
+      
+      if (!userId) {
         return res.status(401).json({ error: 'Not authenticated' });
       }
 
-      const subscriptions = await storage.getUserSubscriptions(req.user.id);
+      const subscriptions = await storage.getUserSubscriptions(userId);
       const activeSubscription = subscriptions.find(s => s.status === 'active');
 
       if (!activeSubscription || !activeSubscription.stripeCustomerId) {
@@ -455,7 +408,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/admin/stats", requireAdmin as any, async (req: AuthRequest, res) => {
+  app.get("/api/admin/stats", isAuthenticated, async (req: Request, res) => {
     try {
       const currentMonth = new Date().toISOString().substring(0, 7);
       const aiUsage = await storage.getAiUsageByMonth(currentMonth);
@@ -469,7 +422,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/admin/ai-usage", requireAdmin as any, async (req: AuthRequest, res) => {
+  app.get("/api/admin/ai-usage", isAuthenticated, async (req: Request, res) => {
     try {
       const budget = await checkAIBudget();
       res.json(budget);

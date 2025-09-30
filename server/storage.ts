@@ -10,10 +10,13 @@ import {
   type InsertAiUsage,
   type Email,
   type InsertEmail,
+  type User,
+  type UpsertUser,
   confessions,
   aiUsage,
   usersSubscriptions,
-  emails
+  emails,
+  users
 } from "@shared/schema";
 
 if (!process.env.DATABASE_URL) {
@@ -35,6 +38,10 @@ const sql = postgres(databaseUrl, {
 export const db = drizzle(sql);
 
 export interface IStorage {
+  // User methods
+  getUser(id: string): Promise<User | undefined>;
+  upsertUser(user: UpsertUser): Promise<User>;
+  
   // Confession methods
   createConfession(confession: InsertConfession): Promise<Confession>;
   getConfessionsByUserId(userId: string, limit?: number): Promise<Confession[]>;
@@ -72,6 +79,27 @@ export interface IStorage {
 }
 
 export class DbStorage implements IStorage {
+  // User methods
+  async getUser(id: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user;
+  }
+
+  async upsertUser(userData: UpsertUser): Promise<User> {
+    const [user] = await db
+      .insert(users)
+      .values(userData)
+      .onConflictDoUpdate({
+        target: users.id,
+        set: {
+          ...userData,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return user;
+  }
+
   // Confession methods
   async createConfession(insertConfession: InsertConfession): Promise<Confession> {
     const result = await db.insert(confessions).values(insertConfession).returning();
