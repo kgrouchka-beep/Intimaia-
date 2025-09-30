@@ -185,7 +185,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/confess", limiterAuthenticated, requireAuth as any, async (req: AuthRequest, res) => {
+  app.post("/api/confess", limiterGeneral, requireAuth as any, async (req: AuthRequest, res) => {
     try {
       if (!req.user) {
         return res.status(401).json({ error: 'Not authenticated' });
